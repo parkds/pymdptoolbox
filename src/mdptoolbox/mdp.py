@@ -265,7 +265,7 @@ class MDP(object):
         # Get the policy and value, for now it is being returned but...
         # Which way is better?
         # 1. Return, (policy, value)
-        return (Q.argmax(axis=0), Q.max(axis=0))
+        return (Q.argmax(axis=0), Q.max(axis=0),Q)
         # 2. update self.policy and self.V directly
         # self.V = Q.max(axis=1)
         # self.policy = Q.argmax(axis=1)
@@ -438,7 +438,7 @@ class FiniteHorizon(MDP):
         self.time = _time.time()
         # loop through each time period
         for n in range(self.N):
-            W, X = self._bellmanOperator(self.V[:, self.N - n])
+            W, X, Qvalue = self._bellmanOperator(self.V[:, self.N - n])
             stage = self.N - n - 1
             self.V[:, stage] = X
             self.policy[:, stage] = W
@@ -547,7 +547,7 @@ class _LP(MDP):
         # only to 10e-8 places. This assumes glpk is installed of course.
         self.V = _np.array(self._linprog(f, M, -h)['x']).reshape(self.S)
         # apply the Bellman operator
-        self.policy, self.V = self._bellmanOperator()
+        self.policy, self.V, Qvalue = self._bellmanOperator()
         # update the time spent solving
         self.time = _time.time() - self.time
         # store value and policy as tuples
@@ -629,7 +629,7 @@ class PolicyIteration(MDP):
             # Initialise the policy to the one which maximises the expected
             # immediate reward
             null = _np.zeros(self.S)
-            self.policy, null = self._bellmanOperator(null)
+            self.policy, null, Qvalue = self._bellmanOperator(null)
             del null
         else:
             # Use the policy that the user supplied
@@ -772,6 +772,7 @@ class PolicyIteration(MDP):
                     print(_MSG_STOP_MAX_ITER)
 
         self.V = policy_V
+        return itr
 
     def _evalPolicyMatrix(self):
         # Evaluate the value function of the policy using linear equations.
@@ -802,6 +803,11 @@ class PolicyIteration(MDP):
         # Run the policy iteration algorithm.
         self._startRun()
 
+        policy_list=[]
+        Q_list=[]
+        n_different_list=[]
+        pi_iteration_list=[]
+
         while True:
             self.iter += 1
             # these _evalPolicy* functions will update the classes value
@@ -809,15 +815,21 @@ class PolicyIteration(MDP):
             if self.eval_type == "matrix":
                 self._evalPolicyMatrix()
             elif self.eval_type == "iterative":
-                self._evalPolicyIterative()
+                pi_iteration=self._evalPolicyIterative()
             # This should update the classes policy attribute but leave the
             # value alone
-            policy_next, null = self._bellmanOperator()
+            policy_next, null, Qvalue = self._bellmanOperator()
             del null
             # calculate in how many places does the old policy disagree with
             # the new policy
             n_different = (policy_next != self.policy).sum()
             # if verbose then continue printing a table
+
+            policy_list.append(policy_next)
+            Q_list.append(Qvalue)
+            n_different_list.append(n_different)
+            pi_iteration_list.append(pi_iteration)
+
             if self.verbose:
                 _printVerbosity(self.iter, n_different)
             # Once the policy is unchanging of the maximum number of
@@ -834,6 +846,7 @@ class PolicyIteration(MDP):
                 self.policy = policy_next
 
         self._endRun()
+        return (policy_list,Q_list,n_different_list,pi_iteration_list)
 
 
 class PolicyIterationModified(PolicyIteration):
@@ -925,7 +938,7 @@ class PolicyIterationModified(PolicyIteration):
         while True:
             self.iter += 1
 
-            self.policy, Vnext = self._bellmanOperator()
+            self.policy, Vnext,Qvalue = self._bellmanOperator()
             # [Ppolicy, PRpolicy] = mdp_computePpolicyPRpolicy(P, PR, policy);
 
             variation = _util.getSpan(Vnext - self.V)
@@ -1048,31 +1061,119 @@ class QLearning(MDP):
         self.Q = _np.zeros((self.S, self.A))
         self.mean_discrepancy = []
 
-    def run(self):
+    def run(self,startstate=0,endstates=[],alphadecay_strategy=0,alpha=0.001,alpha_decay=0.1,expexpstrategy=0,epsilon=1,epsilon_decay=0.01,epsilon_min=0.001,verbose=False):
+
         # Run the Q-learning algoritm.
         discrepancy = []
 
         self.time = _time.time()
 
         # initial state choice
-        s = _np.random.randint(0, self.S)
+        #s = _np.random.randint(0, self.S)
+
+        #We let the start state parameter decide the initial state
+        s=startstate
+
+        policy_list=[]
+        Q_list=[]
+        reward_list=[]
+        episode_iteration=[]
+        policydelta=[]
+
+        alpha=alpha
+
+        r_total = 0
+        episode_runs=0
+        total_runs=0
+
+        policydelta_list=[]
 
         for n in range(1, self.max_iter + 1):
 
+            #if n > 50000:
+            #    verbose=True
             # Reinitialisation of trajectories every 100 transitions
-            if (n % 100) == 0:
-                s = _np.random.randint(0, self.S)
+            #if (n % 100) == 0:
+                #s = _np.random.randint(0, self.S)
+
+            #If finished, make s start in start state
+            #print(s)
+            if s in endstates:
+                #print("s in end state")
+                #print ("endstate")
+                #End of the episode
+                episode_runs = n - total_runs
+                total_runs=n
+
+
+                policy_list.append(self.policy)
+                Q_list.append(self.Q)
+                if verbose==True:
+                    print("end of episode, total reward:",r_total)
+                reward_list.append(r_total)
+                episode_iteration.append(episode_runs)
+                r_total=0
+
+                s = startstate
+
+                policydelta_list.append(policydelta)
+                policydelta=[]
 
             # Action choice : greedy with increasing probability
             # probability 1-(1/log(n+2)) can be changed
             pn = _np.random.random()
-            if pn < (1 - (1 / _math.log(n + 2))):
+
+            #Decay Strategy 1
+            #probability=(1 - (1 / _math.log(n + 2)))
+
+
+            #ADD LEARNING rate decay
+            if alphadecay_strategy == 1:
+                if n==1:
+                    initial_alpha=alpha
+                alpha=initial_alpha*(1/(1+alpha_decay*n)) #decay the alpha at each step
+
+            #elif alphadecay_strategy == 2:
+            #    if n == 1:
+            #        initial_alpha = alpha
+            #    alpha = initial_alpha *   # decay the alpha at each step
+
+            #Constant epsilon
+            if expexpstrategy == 0:
+                probability=epsilon
+
+            # linear decay
+            elif expexpstrategy == 1:
+
+                if n==1: #initialize the decay size in the first iteration
+                    decay_size=epsilon / self.max_iter
+
+                probability=_np.maximum(epsilon,epsilon_min)
+
+                epsilon=epsilon-decay_size # reduce the epsilon linearly.
+
+            #epsilon decay, exponential
+            elif expexpstrategy == 2:
+                probability = _np.maximum(epsilon,epsilon_min) # Choose the min epsilon
+                epsilon=epsilon*(1-epsilon_decay) #epsilon decay
+
+
+
+            if pn < probability:
                 # optimal_action = self.Q[s, :].max()
+                if verbose == True:
+                    print("selecting argmax action")
                 a = self.Q[s, :].argmax()
             else:
                 a = _np.random.randint(0, self.A)
+                if verbose == True:
+                    print("selecting random action")
+            if verbose == True:
+                print("selected action:",a)
 
             # Simulating next state s_new and reward associated to <s,s_new,a>
+
+
             p_s_new = _np.random.random()
             p = 0
             s_new = -1
@@ -1087,11 +1188,20 @@ class QLearning(MDP):
                     r = self.R[s, a]
                 except IndexError:
                     r = self.R[s]
+            if verbose == True:
+                print("next state: ",s_new)
+                print("reward state: ", r)
 
             # Updating the value of Q
             # Decaying update coefficient (1/sqrt(n+2)) can be changed
             delta = r + self.discount * self.Q[s_new, :].max() - self.Q[s, a]
-            dQ = (1 / _math.sqrt(n + 2)) * delta
+
+            #dQ = (1 / _math.sqrt(n + 2)) * delta
+
+            dQ=alpha*delta
+            if verbose == True:
+                print("Q update: ", dQ)
+
             self.Q[s, a] = self.Q[s, a] + dQ
 
             # current state is updated
@@ -1107,9 +1217,25 @@ class QLearning(MDP):
 
             # compute the value function and the policy
             self.V = self.Q.max(axis=1)
+
+
+            if n!=1:
+                oldpolicy=self.policy
+
             self.policy = self.Q.argmax(axis=1)
 
+            if n != 1:
+                policydelta.append(abs(sum(self.policy-oldpolicy)))
+
+            #Get the total reward for this run
+            r_total=r_total+r
+
+            if n==self.max_iter:
+                print("epsilon: ",epsilon)
+                print("alpha: ",alpha)
+
         self._endRun()
+        return ([policy_list,policydelta_list],Q_list,reward_list,episode_iteration)
 
 
 class RelativeValueIteration(MDP):
@@ -1205,7 +1331,7 @@ class RelativeValueIteration(MDP):
 
             self.iter += 1
 
-            self.policy, Vnext = self._bellmanOperator()
+            self.policy, Vnext,Qvalue = self._bellmanOperator()
             Vnext = Vnext - self.gain
 
             variation = _util.getSpan(Vnext - self.V)
@@ -1409,7 +1535,7 @@ class ValueIteration(MDP):
 
         k = 1 - h.sum()
         Vprev = self.V
-        null, value = self._bellmanOperator()
+        null, value, Q_val = self._bellmanOperator()
         # p 201, Proposition 6.6.5
         span = _util.getSpan(value - Vprev)
         max_iter = (_math.log((epsilon * (1 - self.discount) / self.discount) /
@@ -1422,13 +1548,20 @@ class ValueIteration(MDP):
         # Run the value iteration algorithm.
         self._startRun()
 
+        policy_list=[]
+        V_list = []
+        Q_list = []
+
         while True:
             self.iter += 1
 
             Vprev = self.V.copy()
 
             # Bellman Operator: compute policy and value functions
-            self.policy, self.V = self._bellmanOperator()
+            self.policy, self.V, Qvalue = self._bellmanOperator()
+            policy_list.append(self.policy)
+            V_list.append(self.V)
+            Q_list.append(Qvalue)
 
             # The values, based on Q. For the function "max()": the option
             # "axis" means the axis along which to operate. In this case it
@@ -1448,6 +1581,7 @@ class ValueIteration(MDP):
                 break
 
         self._endRun()
+        return (policy_list,V_list,Q_list)
 
 
 class ValueIterationGS(ValueIteration):
